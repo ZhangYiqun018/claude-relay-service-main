@@ -15,6 +15,7 @@ const ProxyHelper = require('../utils/proxyHelper')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const { IncrementalSSEParser } = require('../utils/sseParser')
 const { getSafeMessage } = require('../utils/errorSanitizer')
+const { buildCodexUpstreamHeaders } = require('../utils/openaiCodexUpstreamHeaders')
 
 // Codex CLI 系统提示词（非 Codex CLI 客户端请求时注入，统一端点也使用）
 const CODEX_CLI_INSTRUCTIONS =
@@ -328,15 +329,6 @@ const handleResponses = async (req, res) => {
     // 基于白名单构造上游所需的请求头，确保键为小写且值受控
     const incoming = req.headers || {}
 
-    const allowedKeys = ['version', 'openai-beta', 'session_id']
-
-    const headers = {}
-    for (const key of allowedKeys) {
-      if (incoming[key] !== undefined) {
-        headers[key] = incoming[key]
-      }
-    }
-
     // 判断是否访问 compact 端点
     const isCompactRoute =
       req.path === '/responses/compact' ||
@@ -344,11 +336,14 @@ const handleResponses = async (req, res) => {
       (req.originalUrl && req.originalUrl.includes('/responses/compact'))
 
     // 覆盖或新增必要头部
-    headers['authorization'] = `Bearer ${accessToken}`
-    headers['chatgpt-account-id'] = account.accountId || account.chatgptUserId || accountId
-    headers['host'] = 'chatgpt.com'
-    headers['accept'] = isStream ? 'text/event-stream' : 'application/json'
-    headers['content-type'] = 'application/json'
+    const headers = buildCodexUpstreamHeaders({
+      incomingHeaders: incoming,
+      accessToken,
+      account,
+      accountId,
+      isStream,
+      apiKeyId: apiKeyData.id
+    })
     if (!isCompactRoute) {
       req.body['store'] = false
     } else if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'store')) {
