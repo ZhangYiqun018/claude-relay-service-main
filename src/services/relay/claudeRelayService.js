@@ -1138,7 +1138,7 @@ class ClaudeRelayService {
           content: [
             {
               type: 'text',
-              text: '[System Instructions - follow these strictly]\n' + originalSystemText.trim()
+              text: `[System Instructions - follow these strictly]\n${originalSystemText.trim()}`
             }
           ]
         }
