@@ -4,6 +4,7 @@ const config = require('../../config/config')
 const redis = require('../models/redis')
 const logger = require('../utils/logger')
 const serviceRatesService = require('./serviceRatesService')
+const requestDetailService = require('./requestDetailService')
 const { isClaudeFamilyModel } = require('../utils/modelHelper')
 
 const ACCOUNT_TYPE_CONFIG = {
@@ -1559,7 +1560,8 @@ class ApiKeyService {
     model = 'unknown',
     accountId = null,
     accountType = null,
-    serviceTier = null
+    serviceTier = null,
+    requestMeta = null
   ) {
     try {
       const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
@@ -1662,11 +1664,17 @@ class ApiKeyService {
       }
 
       // 记录单次请求的使用详情（同时保存真实成本和倍率成本）
-      await redis.addUsageRecord(keyId, {
+      const usageRecord = {
         timestamp: new Date().toISOString(),
         model,
         accountId: accountId || null,
         accountType: accountType || null,
+        requestId: requestMeta?.requestId || null,
+        endpoint: requestMeta?.endpoint || null,
+        method: requestMeta?.method || null,
+        statusCode: requestMeta?.statusCode || null,
+        stream: requestMeta?.stream === true,
+        durationMs: requestMeta?.durationMs ?? null,
         inputTokens,
         outputTokens,
         cacheCreateTokens,
@@ -1674,7 +1682,14 @@ class ApiKeyService {
         totalTokens,
         cost: Number(ratedCost.toFixed(6)),
         realCost: Number(realCost.toFixed(6)),
-        realCostBreakdown: costInfo && costInfo.costs ? costInfo.costs : undefined
+        costBreakdown: costInfo?.costs || undefined,
+        realCostBreakdown: costInfo?.costs || undefined,
+        isLongContext: isLongContextRequest
+      }
+
+      await redis.addUsageRecord(keyId, usageRecord)
+      this._captureRequestDetail(keyId, usageRecord, requestMeta).catch((captureError) => {
+        logger.warn(`⚠️ Failed to schedule request detail capture: ${captureError.message}`)
       })
 
       const logParts = [`Model: ${model}`, `Input: ${inputTokens}`, `Output: ${outputTokens}`]
@@ -1733,7 +1748,8 @@ class ApiKeyService {
     usageObject,
     model = 'unknown',
     accountId = null,
-    accountType = null
+    accountType = null,
+    requestMeta = null
   ) {
     try {
       // 提取 token 数量
@@ -1911,6 +1927,12 @@ class ApiKeyService {
         model,
         accountId: accountId || null,
         accountType: accountType || null,
+        requestId: requestMeta?.requestId || null,
+        endpoint: requestMeta?.endpoint || null,
+        method: requestMeta?.method || null,
+        statusCode: requestMeta?.statusCode || null,
+        stream: requestMeta?.stream === true,
+        durationMs: requestMeta?.durationMs ?? null,
         inputTokens,
         outputTokens,
         cacheCreateTokens,
@@ -1932,6 +1954,9 @@ class ApiKeyService {
       }
 
       await redis.addUsageRecord(keyId, usageRecord)
+      this._captureRequestDetail(keyId, usageRecord, requestMeta).catch((captureError) => {
+        logger.warn(`⚠️ Failed to schedule request detail capture: ${captureError.message}`)
+      })
 
       const logParts = [`Model: ${model}`, `Input: ${inputTokens}`, `Output: ${outputTokens}`]
       if (cacheCreateTokens > 0) {
@@ -1992,6 +2017,39 @@ class ApiKeyService {
       logger.error('❌ Failed to record usage:', error)
       return { realCost: 0, ratedCost: 0 }
     }
+  }
+
+  async _captureRequestDetail(keyId, usageRecord, requestMeta = null) {
+    if (!usageRecord) {
+      return
+    }
+
+    await requestDetailService.captureRequestDetail({
+      requestId: requestMeta?.requestId || usageRecord.requestId || null,
+      timestamp: usageRecord.timestamp,
+      requestStartedAt: requestMeta?.requestStartedAt || null,
+      endpoint: requestMeta?.endpoint || usageRecord.endpoint || null,
+      method: requestMeta?.method || usageRecord.method || null,
+      statusCode: requestMeta?.statusCode ?? usageRecord.statusCode ?? 200,
+      stream: requestMeta?.stream === true || usageRecord.stream === true,
+      durationMs: requestMeta?.durationMs ?? usageRecord.durationMs ?? null,
+      requestBody: requestMeta?.requestBody,
+      apiKeyId: keyId,
+      accountId: usageRecord.accountId || null,
+      accountType: usageRecord.accountType || null,
+      model: usageRecord.model || 'unknown',
+      inputTokens: usageRecord.inputTokens || 0,
+      outputTokens: usageRecord.outputTokens || 0,
+      cacheReadTokens: usageRecord.cacheReadTokens || 0,
+      cacheCreateTokens: usageRecord.cacheCreateTokens || 0,
+      totalTokens: usageRecord.totalTokens || 0,
+      cost: usageRecord.cost || 0,
+      realCost: usageRecord.realCost || usageRecord.cost || 0,
+      costBreakdown: usageRecord.costBreakdown || null,
+      realCostBreakdown: usageRecord.realCostBreakdown || usageRecord.costBreakdown || null,
+      isLongContextRequest:
+        usageRecord.isLongContext === true || usageRecord.isLongContextRequest === true
+    })
   }
 
   async _fetchAccountInfo(accountId, accountType, cache, client) {
